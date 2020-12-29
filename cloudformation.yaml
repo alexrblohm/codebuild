@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: I & A Promotional Effectiveness Forecast
+
+Parameters:
+
+  ECRRepository:
+    Type: String
+    Description: The AWS ECR repository URI Docker image to use.
+    ConstraintDescription: must be non-blank
+
+  ContainerTag:
+    Type: String
+    Description: The Docker container tag used at build time.
+    ConstraintDescription: must be non-blank
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: ${AWS::StackName}-LogGroup
+      RetentionInDays: 30
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  QueryTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 4096
+      Memory: 30720
+      ContainerDefinitions:
+        - Name: !Ref ContainerTag
+          Image: !Sub "${ECRRepository}${ContainerTag}:latest"
+          Command:
+            - pipelinectl
+            - query
+          Cpu: 4096
+          Memory: 30720
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region:
+                Ref: AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix:
+                Ref: AWS::StackName
+          Ulimits:
+            - HardLimit: 65536
+              SoftLimit: 10240
+              Name: nofile
+      ExecutionRoleArn: !GetAtt ECSTaskRole.Arn
+      NetworkMode: awsvpc
+
+  ProcessTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 4096
+      Memory: 30720
+      ContainerDefinitions:
+        - Name: !Ref ContainerTag
+          Image: !Sub "${ECRRepository}${ContainerTag}:latest"
+          Command:
+            - pipelinectl
+            - process
+          Cpu: 4096
+          Memory: 30720
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region:
+                Ref: AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix:
+                Ref: AWS::StackName
+          Ulimits:
+            - HardLimit: 65536
+              SoftLimit: 10240
+              Name: nofile
+      ExecutionRoleArn: !GetAtt ECSTaskRole.Arn
+      NetworkMode: awsvpc
+
+  ECSRunTaskSyncExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: FargateTaskNotificationAccessPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "iam:PassRole"
+                Resource:
+                  - !GetAtt ECSTaskRole.Arn
+              - Effect: Allow
+                Action:
+                  - "ecs:RunTask"
+                Resource:
+                  - !Ref QueryTaskDefinition
+                  - !Ref ProcessTaskDefinition
+              - Effect: Allow
+                Action:
+                  - "ecs:StopTask"
+                  - "ecs:DescribeTasks"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "events:PutTargets"
+                  - "events:PutRule"
+                  - "events:DescribeRule"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule"
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName:
+        Fn::Sub: ${AWS::StackName}-StateMachine
+      RoleArn: !GetAtt [ ECSRunTaskSyncExecutionRole, Arn ]
+      DefinitionString: !Sub |
+        {
+          "Comment": "AWS Step Functions Linking ECS Fargate Tasks.",
+          "StartAt": "QueryTask",
+          "Version": "1.0",
+          "States": {
+            "QueryTask": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "Parameters": {
+                "LaunchType": "FARGATE",
+                "Cluster": "arn:aws:ecs:us-west-1:644944822023:cluster/IA",
+                "TaskDefinition": "${QueryTaskDefinition}",
+                "NetworkConfiguration": {
+                  "AwsvpcConfiguration": {
+                    "Subnets": [
+                      "subnet-0b15043d38f2c8961"
+                    ],
+                    "AssignPublicIp": "ENABLED"
+                  }
+                }
+              },
+              "Retry": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 10,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }],
+              "Next": "WaitAfterQueryTask"
+            },
+            "WaitAfterQueryTask": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "Next": "ProcessTask"
+            },
+            "ProcessTask": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "Parameters": {
+                "LaunchType": "FARGATE",
+                "Cluster": "arn:aws:ecs:us-west-1:644944822023:cluster/IA",
+                "TaskDefinition": "${ProcessTaskDefinition}",
+                "NetworkConfiguration": {
+                  "AwsvpcConfiguration": {
+                    "Subnets": [
+                      "subnet-0b15043d38f2c8961"
+                    ],
+                    "AssignPublicIp": "ENABLED"
+                  }
+                }
+              },
+              "Retry": [{
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 10,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }],
+              "Next": "Done"
+            },
+            "Done": {
+              "Type": "Succeed"
+            }
+          }
+        }
