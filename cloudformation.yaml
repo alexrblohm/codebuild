@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
-Description: I & A Promotional Effectiveness Forecast
+Description: I & A Codebuild
 
 Parameters:
 
@@ -42,16 +42,16 @@ Resources:
     Properties:
       RequiresCompatibilities:
         - FARGATE
-      Cpu: 4096
-      Memory: 30720
+      Cpu: 256
+      Memory: 512
       ContainerDefinitions:
         - Name: !Ref ContainerTag
           Image: !Sub "${ECRRepository}${ContainerTag}:latest"
           Command:
             - pipelinectl
             - query
-          Cpu: 4096
-          Memory: 30720
+          Cpu: 256
+          Memory: 512
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -72,16 +72,16 @@ Resources:
     Properties:
       RequiresCompatibilities:
         - FARGATE
-      Cpu: 4096
-      Memory: 30720
+      Cpu: 256
+      Memory: 512
       ContainerDefinitions:
         - Name: !Ref ContainerTag
           Image: !Sub "${ECRRepository}${ContainerTag}:latest"
           Command:
             - pipelinectl
             - process
-          Cpu: 4096
-          Memory: 30720
+          Cpu: 256
+          Memory: 512
           LogConfiguration:
             LogDriver: awslogs
             Options:
